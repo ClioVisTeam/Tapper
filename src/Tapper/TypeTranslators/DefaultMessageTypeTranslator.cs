@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
+using System.Text.Json.Serialization;
 using Microsoft.CodeAnalysis;
 using Tapper.TypeMappers;
 
@@ -28,7 +29,7 @@ internal class DefaultMessageTypeTranslator : ITypeTranslator
         {
             var (memberTypeSymbol, isNullable) = MessageTypeTranslatorHelper.GetMemberTypeSymbol(member, options);
 
-            var (isValid, name) = MessageTypeTranslatorHelper.GetMemberName(member, options);
+            var (isValid, name, canBeOmitted, mustBeIncluded) = MessageTypeTranslatorHelper.GetMemberName(member, options);
 
             if (!isValid)
             {
@@ -37,7 +38,15 @@ internal class DefaultMessageTypeTranslator : ITypeTranslator
 
             // Add jsdoc comment
             codeWriter.Append($"{indent}/** Transpiled from {memberTypeSymbol.ToDisplayString()} */{newLineString}");
-            codeWriter.Append($"{indent}{name}{(isNullable ? "?" : string.Empty)}: {TypeMapper.MapTo(memberTypeSymbol, options)};{newLineString}");
+            var mappedType = TypeMapper.MapTo(memberTypeSymbol, options);
+            // JsonIgnore conditions describe omission separately from nullable CLR values.
+            // Never preserves explicit null and requires presence; conditional omission stays optional.
+            if ((canBeOmitted || mustBeIncluded) && isNullable)
+            {
+                mappedType = $"({mappedType} | null)";
+            }
+            var isOptional = !mustBeIncluded && (isNullable || canBeOmitted);
+            codeWriter.Append($"{indent}{name}{(isOptional ? "?" : string.Empty)}: {mappedType};{newLineString}");
         }
 
         codeWriter.Append('}');
@@ -138,23 +147,41 @@ file static class MessageTypeTranslatorHelper
         return false;
     }
 
-    public static (bool IsValid, string Name) GetMemberName(ISymbol memberSymbol, ITranspilationOptions options)
+    public static (bool IsValid, string Name, bool CanBeOmitted, bool MustBeIncluded) GetMemberName(ISymbol memberSymbol, ITranspilationOptions options)
     {
         if (options.SerializerOption == SerializerOption.Json)
         {
+            string? explicitName = null;
+            var canBeOmitted = false;
+            var mustBeIncluded = false;
             foreach (var attr in memberSymbol.GetAttributes())
             {
                 if (options.SpecialSymbols.JsonIgnoreAttributes.Any(x => SymbolEqualityComparer.Default.Equals(attr.AttributeClass, x)))
                 {
-                    return (false, string.Empty);
+                    var conditionArgument = attr.NamedArguments.FirstOrDefault(argument => argument.Key == nameof(JsonIgnoreAttribute.Condition));
+                    var condition = conditionArgument.Value.Value is int value
+                        ? (JsonIgnoreCondition)value
+                        : JsonIgnoreCondition.Always;
+                    if (condition == JsonIgnoreCondition.WhenWritingNull || condition == JsonIgnoreCondition.WhenWritingDefault)
+                    {
+                        canBeOmitted = true;
+                    }
+                    else if (condition == JsonIgnoreCondition.Never)
+                    {
+                        mustBeIncluded = true;
+                    }
+                    else
+                    {
+                        return (false, string.Empty, false, false);
+                    }
                 }
 
                 if (options.SpecialSymbols.JsonPropertyNameAttributes.Any(x => SymbolEqualityComparer.Default.Equals(attr.AttributeClass, x)))
                 {
-                    var name = attr.ConstructorArguments[0].Value!.ToString()!;
-                    return (true, name);
+                    explicitName = attr.ConstructorArguments[0].Value!.ToString()!;
                 }
             }
+            return (true, explicitName ?? options.NamingStyle.Transform(memberSymbol.Name), canBeOmitted, mustBeIncluded);
         }
         else if (options.SerializerOption == SerializerOption.MessagePack)
         {
@@ -162,7 +189,7 @@ file static class MessageTypeTranslatorHelper
             {
                 if (options.SpecialSymbols.MessagePackIgnoreMemberAttributes.Any(x => SymbolEqualityComparer.Default.Equals(attr.AttributeClass, x)))
                 {
-                    return (false, string.Empty);
+                    return (false, string.Empty, false, false);
                 }
 
                 if (options.SpecialSymbols.MessagePackKeyAttributes.Any(x => SymbolEqualityComparer.Default.Equals(attr.AttributeClass, x)))
@@ -170,12 +197,12 @@ file static class MessageTypeTranslatorHelper
                     if (attr.ConstructorArguments[0].Type?.SpecialType == SpecialType.System_String)
                     {
                         var name = attr.ConstructorArguments[0].Value!.ToString()!;
-                        return (true, name);
+                        return (true, name, false, false);
                     }
                 }
             }
         }
 
-        return (true, options.NamingStyle.Transform(memberSymbol.Name));
+        return (true, options.NamingStyle.Transform(memberSymbol.Name), false, false);
     }
 }
