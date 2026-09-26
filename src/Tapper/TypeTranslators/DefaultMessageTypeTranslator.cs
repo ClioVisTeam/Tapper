@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
+using System.Text.Json.Serialization;
 using Microsoft.CodeAnalysis;
 using Tapper.TypeMappers;
 
@@ -28,7 +29,7 @@ internal class DefaultMessageTypeTranslator : ITypeTranslator
         {
             var (memberTypeSymbol, isNullable) = MessageTypeTranslatorHelper.GetMemberTypeSymbol(member, options);
 
-            var (isValid, name) = MessageTypeTranslatorHelper.GetMemberName(member, options);
+            var (isValid, name, canBeOmitted) = MessageTypeTranslatorHelper.GetMemberName(member, options);
 
             if (!isValid)
             {
@@ -37,7 +38,7 @@ internal class DefaultMessageTypeTranslator : ITypeTranslator
 
             // Add jsdoc comment
             codeWriter.Append($"{indent}/** Transpiled from {memberTypeSymbol.ToDisplayString()} */{newLineString}");
-            codeWriter.Append($"{indent}{name}{(isNullable ? "?" : string.Empty)}: {TypeMapper.MapTo(memberTypeSymbol, options)};{newLineString}");
+            codeWriter.Append($"{indent}{name}{(isNullable || canBeOmitted ? "?" : string.Empty)}: {TypeMapper.MapTo(memberTypeSymbol, options)};{newLineString}");
         }
 
         codeWriter.Append('}');
@@ -138,23 +139,36 @@ file static class MessageTypeTranslatorHelper
         return false;
     }
 
-    public static (bool IsValid, string Name) GetMemberName(ISymbol memberSymbol, ITranspilationOptions options)
+    public static (bool IsValid, string Name, bool CanBeOmitted) GetMemberName(ISymbol memberSymbol, ITranspilationOptions options)
     {
         if (options.SerializerOption == SerializerOption.Json)
         {
+            string? explicitName = null;
+            var canBeOmitted = false;
             foreach (var attr in memberSymbol.GetAttributes())
             {
                 if (options.SpecialSymbols.JsonIgnoreAttributes.Any(x => SymbolEqualityComparer.Default.Equals(attr.AttributeClass, x)))
                 {
-                    return (false, string.Empty);
+                    var conditionArgument = attr.NamedArguments.FirstOrDefault(argument => argument.Key == nameof(JsonIgnoreAttribute.Condition));
+                    var condition = conditionArgument.Value.Value is int value
+                        ? (JsonIgnoreCondition)value
+                        : JsonIgnoreCondition.Always;
+                    if (condition == JsonIgnoreCondition.WhenWritingNull || condition == JsonIgnoreCondition.WhenWritingDefault)
+                    {
+                        canBeOmitted = true;
+                    }
+                    else if (condition != JsonIgnoreCondition.Never)
+                    {
+                        return (false, string.Empty, false);
+                    }
                 }
 
                 if (options.SpecialSymbols.JsonPropertyNameAttributes.Any(x => SymbolEqualityComparer.Default.Equals(attr.AttributeClass, x)))
                 {
-                    var name = attr.ConstructorArguments[0].Value!.ToString()!;
-                    return (true, name);
+                    explicitName = attr.ConstructorArguments[0].Value!.ToString()!;
                 }
             }
+            return (true, explicitName ?? options.NamingStyle.Transform(memberSymbol.Name), canBeOmitted);
         }
         else if (options.SerializerOption == SerializerOption.MessagePack)
         {
@@ -162,7 +176,7 @@ file static class MessageTypeTranslatorHelper
             {
                 if (options.SpecialSymbols.MessagePackIgnoreMemberAttributes.Any(x => SymbolEqualityComparer.Default.Equals(attr.AttributeClass, x)))
                 {
-                    return (false, string.Empty);
+                    return (false, string.Empty, false);
                 }
 
                 if (options.SpecialSymbols.MessagePackKeyAttributes.Any(x => SymbolEqualityComparer.Default.Equals(attr.AttributeClass, x)))
@@ -170,12 +184,12 @@ file static class MessageTypeTranslatorHelper
                     if (attr.ConstructorArguments[0].Type?.SpecialType == SpecialType.System_String)
                     {
                         var name = attr.ConstructorArguments[0].Value!.ToString()!;
-                        return (true, name);
+                        return (true, name, false);
                     }
                 }
             }
         }
 
-        return (true, options.NamingStyle.Transform(memberSymbol.Name));
+        return (true, options.NamingStyle.Transform(memberSymbol.Name), false);
     }
 }
