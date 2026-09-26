@@ -39,7 +39,8 @@ public class ConditionalJsonIgnoreTests
         var first = Generate($"{ignore} {rename} public string? Value {{ get; set; }}");
         var second = Generate($"{rename} {ignore} public string? Value {{ get; set; }}");
         Assert.Equal(first, second);
-        Assert.Equal(included, first.Contains("renamed?: string;", StringComparison.Ordinal));
+        var expectedType = condition == "Never" ? "string" : "(string | null)";
+        Assert.Equal(included, first.Contains($"renamed?: {expectedType};", StringComparison.Ordinal));
         Assert.DoesNotContain("value", first);
     }
 
@@ -47,8 +48,16 @@ public class ConditionalJsonIgnoreTests
     public void Nullable_union_arm_is_optional_and_unconditional_secret_is_excluded()
     {
         var code = Generate("[JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? StringValue { get; set; } [JsonIgnore] public string PasswordHash { get; set; } = \"\";");
-        Assert.Contains("stringValue?: string;", code);
+        Assert.Contains("stringValue?: (string | null);", code);
         Assert.DoesNotContain("passwordHash", code);
+    }
+
+    [Fact]
+    public void Conditionally_omitted_nullable_value_preserves_null_for_serialization()
+    {
+        var code = Generate("[JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public System.Guid? GuidValue { get; set; } [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] public int? NumberValue { get; set; }");
+        Assert.Contains("guidValue?: (string | null);", code);
+        Assert.Contains("numberValue?: (number | null);", code);
     }
 
     private static string Generate(string members)

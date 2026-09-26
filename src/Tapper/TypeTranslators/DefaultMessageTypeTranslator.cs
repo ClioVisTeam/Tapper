@@ -38,7 +38,13 @@ internal class DefaultMessageTypeTranslator : ITypeTranslator
 
             // Add jsdoc comment
             codeWriter.Append($"{indent}/** Transpiled from {memberTypeSymbol.ToDisplayString()} */{newLineString}");
-            codeWriter.Append($"{indent}{name}{(isNullable || canBeOmitted ? "?" : string.Empty)}: {TypeMapper.MapTo(memberTypeSymbol, options)};{newLineString}");
+            var mappedType = TypeMapper.MapTo(memberTypeSymbol, options);
+            // Preserve nullable input values for conditional omission (JSON serialization drops null/default).
+            if (canBeOmitted && isNullable)
+            {
+                mappedType = $"({mappedType} | null)";
+            }
+            codeWriter.Append($"{indent}{name}{(isNullable || canBeOmitted ? "?" : string.Empty)}: {mappedType};{newLineString}");
         }
 
         codeWriter.Append('}');
