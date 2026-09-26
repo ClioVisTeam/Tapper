@@ -28,20 +28,33 @@ public class ConditionalJsonIgnoreTests
     }
 
     [Theory]
+    [InlineData("", false)]
     [InlineData("Always", false)]
     [InlineData("Never", true)]
     [InlineData("WhenWritingNull", true)]
     [InlineData("WhenWritingDefault", true)]
     public void Naming_does_not_override_ignore_regardless_of_attribute_order(string condition, bool included)
     {
-        var ignore = $"[JsonIgnore(Condition = JsonIgnoreCondition.{condition})]";
+        var ignore = condition.Length == 0 ? "[JsonIgnore]" : $"[JsonIgnore(Condition = JsonIgnoreCondition.{condition})]";
         const string rename = "[JsonPropertyName(\"renamed\")]";
         var first = Generate($"{ignore} {rename} public string? Value {{ get; set; }}");
         var second = Generate($"{rename} {ignore} public string? Value {{ get; set; }}");
         Assert.Equal(first, second);
-        var expectedType = condition == "Never" ? "string" : "(string | null)";
-        Assert.Equal(included, first.Contains($"renamed?: {expectedType};", StringComparison.Ordinal));
+        var optional = condition == "Never" ? "" : "?";
+        Assert.Equal(included, first.Contains($"renamed{optional}: (string | null);", StringComparison.Ordinal));
         Assert.DoesNotContain("value", first);
+    }
+
+    [Theory]
+    [InlineData("string?", "string", "{ get; set; }")]
+    [InlineData("System.Guid?", "string", "{ get; set; }")]
+    [InlineData("int?", "number", "{ get; set; }")]
+    [InlineData("int?", "number", ";")]
+    public void Never_nullable_member_is_required_and_preserves_null(string type, string mappedType, string suffix)
+    {
+        var code = Generate($"[JsonIgnore(Condition = JsonIgnoreCondition.Never)] public {type} Value {suffix}");
+        Assert.Contains($"value: ({mappedType} | null);", code);
+        Assert.DoesNotContain("value?:", code);
     }
 
     [Fact]

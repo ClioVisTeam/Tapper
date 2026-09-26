@@ -29,7 +29,7 @@ internal class DefaultMessageTypeTranslator : ITypeTranslator
         {
             var (memberTypeSymbol, isNullable) = MessageTypeTranslatorHelper.GetMemberTypeSymbol(member, options);
 
-            var (isValid, name, canBeOmitted) = MessageTypeTranslatorHelper.GetMemberName(member, options);
+            var (isValid, name, canBeOmitted, mustBeIncluded) = MessageTypeTranslatorHelper.GetMemberName(member, options);
 
             if (!isValid)
             {
@@ -39,12 +39,14 @@ internal class DefaultMessageTypeTranslator : ITypeTranslator
             // Add jsdoc comment
             codeWriter.Append($"{indent}/** Transpiled from {memberTypeSymbol.ToDisplayString()} */{newLineString}");
             var mappedType = TypeMapper.MapTo(memberTypeSymbol, options);
-            // Preserve nullable input values for conditional omission (JSON serialization drops null/default).
-            if (canBeOmitted && isNullable)
+            // JsonIgnore conditions describe omission separately from nullable CLR values.
+            // Never preserves explicit null and requires presence; conditional omission stays optional.
+            if ((canBeOmitted || mustBeIncluded) && isNullable)
             {
                 mappedType = $"({mappedType} | null)";
             }
-            codeWriter.Append($"{indent}{name}{(isNullable || canBeOmitted ? "?" : string.Empty)}: {mappedType};{newLineString}");
+            var isOptional = !mustBeIncluded && (isNullable || canBeOmitted);
+            codeWriter.Append($"{indent}{name}{(isOptional ? "?" : string.Empty)}: {mappedType};{newLineString}");
         }
 
         codeWriter.Append('}');
@@ -145,12 +147,13 @@ file static class MessageTypeTranslatorHelper
         return false;
     }
 
-    public static (bool IsValid, string Name, bool CanBeOmitted) GetMemberName(ISymbol memberSymbol, ITranspilationOptions options)
+    public static (bool IsValid, string Name, bool CanBeOmitted, bool MustBeIncluded) GetMemberName(ISymbol memberSymbol, ITranspilationOptions options)
     {
         if (options.SerializerOption == SerializerOption.Json)
         {
             string? explicitName = null;
             var canBeOmitted = false;
+            var mustBeIncluded = false;
             foreach (var attr in memberSymbol.GetAttributes())
             {
                 if (options.SpecialSymbols.JsonIgnoreAttributes.Any(x => SymbolEqualityComparer.Default.Equals(attr.AttributeClass, x)))
@@ -163,9 +166,13 @@ file static class MessageTypeTranslatorHelper
                     {
                         canBeOmitted = true;
                     }
-                    else if (condition != JsonIgnoreCondition.Never)
+                    else if (condition == JsonIgnoreCondition.Never)
                     {
-                        return (false, string.Empty, false);
+                        mustBeIncluded = true;
+                    }
+                    else
+                    {
+                        return (false, string.Empty, false, false);
                     }
                 }
 
@@ -174,7 +181,7 @@ file static class MessageTypeTranslatorHelper
                     explicitName = attr.ConstructorArguments[0].Value!.ToString()!;
                 }
             }
-            return (true, explicitName ?? options.NamingStyle.Transform(memberSymbol.Name), canBeOmitted);
+            return (true, explicitName ?? options.NamingStyle.Transform(memberSymbol.Name), canBeOmitted, mustBeIncluded);
         }
         else if (options.SerializerOption == SerializerOption.MessagePack)
         {
@@ -182,7 +189,7 @@ file static class MessageTypeTranslatorHelper
             {
                 if (options.SpecialSymbols.MessagePackIgnoreMemberAttributes.Any(x => SymbolEqualityComparer.Default.Equals(attr.AttributeClass, x)))
                 {
-                    return (false, string.Empty, false);
+                    return (false, string.Empty, false, false);
                 }
 
                 if (options.SpecialSymbols.MessagePackKeyAttributes.Any(x => SymbolEqualityComparer.Default.Equals(attr.AttributeClass, x)))
@@ -190,12 +197,12 @@ file static class MessageTypeTranslatorHelper
                     if (attr.ConstructorArguments[0].Type?.SpecialType == SpecialType.System_String)
                     {
                         var name = attr.ConstructorArguments[0].Value!.ToString()!;
-                        return (true, name, false);
+                        return (true, name, false, false);
                     }
                 }
             }
         }
 
-        return (true, options.NamingStyle.Transform(memberSymbol.Name), false);
+        return (true, options.NamingStyle.Transform(memberSymbol.Name), false, false);
     }
 }
